@@ -32,6 +32,16 @@
 #endif
 #endif
 
+/*
+ * 全局状态（被中断与其它任务共享，volatile 只保护"单次读写的可见性"，不保护一致性）：
+ *   pidTaskNotification         ADC ISR 用来唤醒本任务的句柄，创建任务后立刻保存
+ *   currentTempTargetDegC       当前设定温度（C），由 GUI 模式的各函数写入
+ *   powerSupplyWattageLimit     电源协商得到的功率上限（单位 W），由 USBPD 写入；
+ *                               使用时再 ×10 换算成 x10 W 与其它限值比较
+ *   heaterThermalRunawayCounter 热失控"积分"计数，>8 时强制断输出（见下）
+ * KeepAwakePulse 的时间基准：设置项只存 1..9 的倍率，实际等待 2.5 s*倍率、
+ * 脉宽 250 ms*倍率（见 setOutputx10WattsViaFilters）；TICKS_100MS=100 ticks（1 tick=1 ms）。
+ */
 static TickType_t          powerPulseWaitUnit          = 25 * TICKS_100MS;      // 2.5 s
 static TickType_t          powerPulseDurationUnit      = (5 * TICKS_100MS) / 2; // 250 ms
 TaskHandle_t               pidTaskNotification         = NULL;
@@ -44,6 +54,16 @@ static void    detectThermalRunaway(const TemperatureType_t currentTipTempInC, c
 static void    setOutputx10WattsViaFilters(int32_t x10Watts);
 int32_t        getX10WattageLimits();
 
+/**
+ * @brief PID 控温任务：阻塞等 ADC 中断 → 读温度 → 算功率 → 下发 PWM
+ * @param argument 未使用（osThreadStaticDef 要求的签名）
+ * @note  优先级 osPriorityRealtime（全系统最高），实时性由它兜底。它不轮询：
+ *        ADC 注入组在 PWM 周期采样窗口结束时进 ADC0_1_IRQHandler，ISR 里
+ *        vTaskNotifyGiveFromISR 唤醒本任务，所以控制周期由硬件定时器决定，
+ *        软件调度抖动不会改变采样相位。
+ *        共享数据：currentTempTargetDegC（GUI 写）、powerSupplyWattageLimit
+ *        （POWTask/USBPD 写）、heaterThermalRunawayCounter（本任务写、GUI 读）。
+ */
 /* StartPIDTask function */
 void startPIDTask(void const *argument __unused) {
   /*
@@ -57,6 +77,8 @@ void startPIDTask(void const *argument __unused) {
 
   pidTaskNotification = xTaskGetCurrentTaskHandle();
 
+  // 预热 32 次采样：TipThermoModel 与输入电压都带滑动滤波，空滤波器初值为 0，
+  // 直接进闭环会算出巨大误差。每次最多等 5 tick，等不到也继续，属于"尽力预填充"。
   TemperatureType_t PIDTempTarget = 0;
   // Pre-seed the adc filters
   for (int i = 0; i < 32; i++) {
@@ -65,6 +87,7 @@ void startPIDTask(void const *argument __unused) {
     getInputVoltageX10(getSettingValue(SettingsOptions::VoltageDiv), 1);
   }
 
+  // 板级自检（MHP30 用它测加热板电阻）；2 s 超时兜底，避免自检永不返回导致不加热。
   while (preStartChecks() == 0) {
     resetWatchdog();
     ulTaskNotifyTake(pdTRUE, 2000);
@@ -124,6 +147,8 @@ void startPIDTask(void const *argument __unused) {
           PIDTempTarget = TipThermoModel::getTipMaxInC();
         }
 
+      // 注意：目标为 0 时不调用 PID，而是直接把功率按 0 处理并喂给热失控检测，
+      // 这样"关机状态下温度仍上升"也能被 detectThermalRunaway 捕获。
         x10WattsOut = getPIDResultX10Watts(PIDTempTarget, currentTipTempInC);
         detectThermalRunaway(currentTipTempInC, x10WattsOut);
       } else {
@@ -132,11 +157,13 @@ void startPIDTask(void const *argument __unused) {
       setOutputx10WattsViaFilters(x10WattsOut);
     } else {
       // ADC interrupt timeout
+      // 拿不到新温度就绝不允许继续加热：宁可掉温，也不能用陈旧读数闭环。
       setTipPWM(0, false);
     }
 #ifdef DEBUG_UART_OUTPUT
     log_system_state(x10WattsOut);
 #endif
+    // 热失控计数每秒衰减 1：必须"持续异常"才能累积到触发阈值（>8，见过滤函数）。
     if (xTaskGetTickCount() - lastThermalRunawayDecay > TICKS_SECOND) {
       lastThermalRunawayDecay = xTaskGetTickCount();
       if (heaterThermalRunawayCounter > 0) {
@@ -147,6 +174,12 @@ void startPIDTask(void const *argument __unused) {
 }
 
 #ifdef TIP_CONTROL_PID
+/**
+ * @brief 编译期参数化的位置式 PID（Kp/Ki/Kd 来自板级 configuration.h）
+ * @tparam T 运算类型，本工程实例化为 TemperatureType_t（int16_t）
+ * @note  与下面的 Integrator 二选一编译（TIP_CONTROL_PID 开关）：PID 要整定三个
+ *        参数，Integrator 只需"热容/惯性"两个物理量。
+ */
 template <class T, T Kp, T Ki, T Kd, T integral_limit_scale> struct PID {
   T previous_error_term;
   T integration_running_sum;
@@ -157,12 +190,16 @@ template <class T, T Kp, T Ki, T Kd, T integral_limit_scale> struct PID {
     // Proportional term
     const T kp_result = Kp * target_delta;
 
+    // 积分项按实际间隔归一化：采样率不固定（ADC 周期会随快/慢 PWM 切换变化），
+    // 所以乘 interval_ms 再除 1000 得到"每秒"等效增量，避免切换 PWM 模式时积分突变。
     // Integral term as we use mixed sampling rates, we cant assume a constant sample interval
     // Thus we multiply this out by the interval time to ~= dv/dt
     // Then the shift by 1000 is ms -> Seconds
 
     integration_running_sum += (target_delta * (T)interval_ms * Ki) / 1000;
 
+    // 抗积分饱和：夹在 ±(5×最大输出)。冷启动误差几百 C，没有这个夹子积分会瞬间
+    // 涨到天文数字，到温后要很久才能退饱和 → 典型的大幅超调。
     // We constrain integration_running_sum to limit windup
     // This is not overly required for most use cases but can prevent large overshoot in constrained implementations
     if (integration_running_sum > integral_limit_scale * max_output) {
@@ -194,6 +231,13 @@ template <class T, T Kp, T Ki, T Kd, T integral_limit_scale> struct PID {
   }
 };
 #else
+/**
+ * @brief 自衰减积分器（IronOS 默认控制器）：以"热容 × 温差"作为需求功率
+ * @note  不用标准 PID 的原因：热电偶在两次加热间隙采样，读数滞后且噪声大，
+ *        微分项会被噪声放大；纯积分在大误差时又太慢。这里的写法是"带泄漏的
+ *        积分 + 比例型增益"：温差大时接近 P，接近设定点时逐渐退化为纯 I
+ *        （getPIDResultX10Watts 上方有原作者的长篇推导）。
+ */
 template <class T = TemperatureType_t> struct Integrator {
   T sum;
 
@@ -215,15 +259,27 @@ template <class T = TemperatureType_t> struct Integrator {
     return sum;
   }
 
+  // 直接重置积分状态；切换工作模式（如进入 Boost）时可用它清历史。
+  // get(positiveOnly) 默认只返回正向累积，避免"负功率"被当成制冷指令。
   void set(T const val) { sum = val; }
 
   T get(bool positiveOnly = true) const { return (positiveOnly) ? ((sum > 0) ? sum : 0) : sum; }
 };
 #endif
+/**
+ * @brief 计算本周期输出功率（x10 W）
+ * @param set_point       目标温度（C）
+ * @param current_reading 实测温度（C）
+ * @return 0 .. getX10WattageLimits() 之间的功率指令
+ * @note  用 static 变量记录上次调用时刻求真实间隔，所以不要求调用频率恒定；
+ *        但间隔必须 > 0 tick，否则 rate 会除零（实际由 ADC 周期保证数十 ms）。
+ */
 int32_t getPIDResultX10Watts(TemperatureType_t set_point, TemperatureType_t current_reading) {
   static TickType_t lastCall = 0;
 
 #ifdef TIP_CONTROL_PID
+  // PID 实例与 lastCall 都是函数内 static：每个文件只有一份控制器状态，
+  // 且只能在 PID 任务里调用（非线程安全）。
   static PID<TemperatureType_t, TIP_PID_KP, TIP_PID_KI, TIP_PID_KD, 5> pid = {0, 0};
 
   const TickType_t interval = (xTaskGetTickCount() - lastCall);
@@ -258,6 +314,12 @@ int32_t getPIDResultX10Watts(TemperatureType_t set_point, TemperatureType_t curr
 #ifdef TIP_CONTROL_PID
   return pid.update(set_point, current_reading, interval, getX10WattageLimits());
 #else
+  // 四个入参的物理含义：
+  //   val   = 热容(x10 J/C) × 温差(C)  → 1 秒内补齐温差所需的 x10 W
+  //   inertia = 惯性，越小旧值权重越大（平滑但响应慢）
+  //   gain  = 2，固定增益（原作者调参结果）
+  //   rate  = 控制频率 Hz（TICKS_SECOND/间隔），用于把"每秒"换算成"每周期"
+  //   limit = 当前可用功率上限（电源/用户/硬件/手柄降额的综合结果）
   return powerStore.update(((TemperatureType_t)getTipThermalMass()) * (set_point - current_reading), // the required power
                            getTipInertia(),                                                          // Inertia, smaller numbers increase dominance of the previous value
                            2,                                                                        // gain
@@ -277,8 +339,18 @@ int32_t getPIDResultX10Watts(TemperatureType_t set_point, TemperatureType_t curr
  * These boil down to either a constantly rising temperature or a temperature that is stuck at a value
  * These are both covered; but looking at the eye/delta between min and max temp seen
  */
+/**
+ * @brief 热失控检测：加热一段时间后温度没有"应有的上升幅度"就累加告警计数
+ * @param currentTipTempInC 当前烙铁头温度（C）
+ * @param x10WattsOut       本周期输出功率（x10 W），>0 视为"正在加热"
+ * @note  覆盖两类故障：① 加热 MOSFET 击穿 → 关断时温度仍上升或顶到 ADC 满量程；
+ *        ② 测温链路损坏 → 温度卡在某个值，加热 20 s 后温差仍小于 3 C。
+ *        计数由 PID 主循环每秒衰减 1，只有持续异常才会累积到 >8 触发关机。
+ */
 void detectThermalRunaway(const TemperatureType_t currentTipTempInC, const uint32_t x10WattsOut) {
 
+  // 这些 static 是跨调用的"观测窗口"，一次检测横跨数十秒，不能放在栈上。
+  // haveSeenDelta 一旦置位就永久跳过后续统计（每次上电只判定一次）。
   static TemperatureType_t tiptempMin         = 0xFFFF; // Min tip temp seen
   static TemperatureType_t tipTempMax         = 0;      // Max tip temp seen while heater is on
   bool                     thisCycleIsHeating = x10WattsOut > 0;
@@ -287,6 +359,8 @@ void detectThermalRunaway(const TemperatureType_t currentTipTempInC, const uint3
   static bool haveSeenDelta = false;
 
   // Check for readings being pegged at the top of the ADC while the heater is off
+  // 场景 ①b：加热已关断，原始 ADC 却贴顶（满量程 32768，留 8 计数噪声余量）
+  // → 说明功率管可能击穿、热电偶仍在被加热，直接累加计数（每秒最多 +1）。
   if (!thisCycleIsHeating && (getTipRawTemp(0) > (ADC_MAX_READING - 8)) && heaterThermalRunawayCounter < 255) {
     heaterThermalRunawayCounter++;
   }
@@ -309,6 +383,8 @@ void detectThermalRunaway(const TemperatureType_t currentTipTempInC, const uint3
     heatCycleStart = 0;
   }
 
+  // 场景 ②：连续加热满 THERMAL_RUNAWAY_TIME_SEC（默认 20 s）后评估温升。
+  // 正常烙铁 20 s 至少升温几十度；温差 < THERMAL_RUNAWAY_TEMP_C（3 C）说明测温已失效。
   if ((xTaskGetTickCount() - heatCycleStart) > (THERMAL_RUNAWAY_TIME_SEC * TICKS_SECOND)) {
     if (tipTempMax > tiptempMin) {
       // Have been heating for min seconds, check if the delta is large enough
@@ -322,6 +398,14 @@ void detectThermalRunaway(const TemperatureType_t currentTipTempInC, const uint3
   }
 }
 
+/**
+ * @brief 汇总所有功率限制，返回本周期允许的最大输出（x10 W）
+ * @return 可用功率上限
+ * @note  取四级限制的最小值：电源能力(availableW10) → 用户 PowerLimit →
+ *        PD/QC 协商的电源瓦数 → 硬件额定(ENFORCE_HARDWARE_MAX_WATTAGE)，
+ *        最后再按手柄 NTC 温度做线性降额（HANDLE_DERATE_*）。
+ *        每次调用都会读 ADC（availableW10 内部采样），所以不要在 ISR 里调用。
+ */
 int32_t getX10WattageLimits() {
   int32_t limit = availableW10(0);
 
@@ -354,6 +438,13 @@ int32_t getX10WattageLimits() {
   return limit;
 }
 
+/**
+ * @brief 输出前的最后一道"过滤 + 保护"，然后真正写 PWM
+ * @param x10WattsOut PID 计算出的功率指令（x10 W）
+ * @note  依次做：KeepAwakePulse 抬底 → ADC 贴顶保护 → 热失控计数保护 →
+ *        SLEW_LIMIT 斜率限制 → setTipX10Watts。这里也是唯一喂看门狗的地方，
+ *        意味着"控制环停转"必然导致看门狗复位，而不是悄悄停止加热。
+ */
 void setOutputx10WattsViaFilters(int32_t x10WattsOut) {
   static TickType_t lastPowerPulseStart = 0;
   static TickType_t lastPowerPulseEnd   = 0;
@@ -376,10 +467,14 @@ void setOutputx10WattsViaFilters(int32_t x10WattsOut) {
     }
   }
 
+  // 与 detectThermalRunaway 里的贴顶判断互补：那里累计计数，这里立即断输出。
+  // 阈值 0x7FFF-32 表示已进入满量程最后 32 个计数（约 0.1% 量程）。
   // Secondary safety check to forcefully disable header when within ADC noise of top of ADC
   if (getTipRawTemp(0) > (0x7FFF - 32)) {
     x10WattsOut = 0;
   }
+  // 计数 >8 才真正切断：单次异常（例如拔插烙铁头造成的瞬时贴顶）不会误关机，
+  // 连续 9 秒以上的异常才判定为热失控。
   if (heaterThermalRunawayCounter > 8) {
     x10WattsOut = 0;
   }
@@ -392,6 +487,9 @@ void setOutputx10WattsViaFilters(int32_t x10WattsOut) {
   }
   x10WattsOutLast = x10WattsOut;
 #endif
+  // setTipX10Watts 内部会做 W→PWM 的电压补偿换算；此处调用频率 = ADC 周期，
+  // 也是整条链路里唯一"写硬件"的动作。
   setTipX10Watts(x10WattsOut);
+  // 看门狗只在成功走完一次控制周期后重装：任何一步卡死都会让 IWDG 溢出复位。
   resetWatchdog();
 }

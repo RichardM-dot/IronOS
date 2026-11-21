@@ -14,6 +14,22 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+/*
+ * ============================================================================
+ * 【文件导读】OLED.cpp —— SSD1306 单色 OLED 驱动与绘图原语
+ * ----------------------------------------------------------------------------
+ * 主要函数（按调用层次）：
+ *   initialize()/setBrightness()/setInverseDisplay()/setRotation()  面板配置
+ *   clearScreen()/refresh()/setFramebuffer()                        帧缓冲管理
+ *   drawChar()/print()/printNumber()/drawSymbol()/drawArea()        文本与图标
+ *   transitionScrollUp/Down()/transitionSecondaryFramebuffer()      页面切换动画
+ * 缓冲结构：screenBuffer = [17 字节头][WIDTH*(HEIGHT/8) 像素][10 字节尾]，
+ *           头部给 I2C 命令留位置，尾部留填充，保证一次连续写就能刷屏。
+ * 双缓冲：secondFrameBuffer 用于转场动画的"下一帧"。
+ * 总线：I2C_CLASS（Pinecil 为 I2CBB2 软件模拟），一次 refresh 约 1 KB 传输，
+ *       在 400 kHz 下约 25 ms，因此刷新率被限制在 20~25 fps。
+ * ============================================================================
+ */
 
 // rendering to the buffer
 uint8_t *OLED::stripPointers[4]; // Pointers to the strips to allow for buffer having extra content

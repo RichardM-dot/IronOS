@@ -13,12 +13,29 @@
 #error Max PD Voltage must be defined
 #endif
 
+/*
+ * USB-PD 适配层总览
+ * ---------------------------------------------------------------------------
+ * Drivers/usb-pd/ 是一套独立的 PD 协议栈（PolicyEngine + FUSB302 驱动），
+ * 它通过四个回调与固件交互：
+ *   pdbs_dpm_get_sink_capability()  告诉充电器"我要什么"（Sink Capabilities）
+ *   pdbs_dpm_evaluate_capability()  从 Source Capabilities 里挑一档并构造 Request
+ *   EPREvaluateCapabilityFunc()     EPR（>20V）档位的同样逻辑
+ *   ms_delay / get_ms_timestamp     时间基准与阻塞延时
+ * 本文件就是这层"胶水"，外加一个纯 C 的整数平方根（EPR 用）。
+ * 电压/电流单位非常容易混淆，统一约定：
+ *   PDO 原始字段：电压 50 mV/bit、电流 10 mA/bit
+ *   选择结果 bestVoltage 用 mV、bestCurrent 用 10 mA（centi-amp 的 1/10）
+ * 协商结果写回 requested_voltage_mv 与 powerSupplyWattageLimit（单位 W）。
+ */
 void ms_delay(uint32_t delayms) {
   // Convert ms -> ticks
   TickType_t ticks = delayms / portTICK_PERIOD_MS;
 
   vTaskDelay(ticks ? ticks : 1); /* Minimum delay = 1 tick */
 }
+// 协议栈要的是毫秒时间戳，而 FreeRTOS 给的是 tick（本项目 1 tick=1 ms，
+// 仍然显式乘 portTICK_PERIOD_MS，方便换到别的 tick 配置时不出错）。
 uint32_t get_ms_timestamp() {
   // Convert ticks -> ms
   return xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -26,6 +43,9 @@ uint32_t get_ms_timestamp() {
 bool         pdbs_dpm_evaluate_capability(const pd_msg *capabilities, pd_msg *request);
 void         pdbs_dpm_get_sink_capability(pd_msg *cap, const bool isPD3);
 bool         EPREvaluateCapabilityFunc(const epr_pd_msg *capabilities, pd_msg *request);
+// 全局对象：FUSB302 驱动 + 策略引擎。构造参数是 I2C 地址（左移 1 位）与
+// BSP 提供的读写/延时函数，因此本文件不直接碰 HAL。
+// detectionState：0=未探测，1=找到芯片；缓存结果避免每次访问都读 I2C。
 FUSB302      fusb((0x22 << 1), fusb_read_buf, fusb_write_buf, ms_delay); // Create FUSB driver
 PolicyEngine pe(fusb, get_ms_timestamp, ms_delay, pdbs_dpm_get_sink_capability, pdbs_dpm_evaluate_capability, EPREvaluateCapabilityFunc, USB_PD_EPR_WATTAGE);
 int          USBPowerDelivery::detectionState = 0;
@@ -36,6 +56,13 @@ uint16_t     requested_voltage_mv             = 0;
 #define DPM_MIN_CURRENT PD_MA2PDI(100)
 
 // Start processing
+/**
+ * @brief 初始化 FUSB302 并打开其 IRQ（由 POWTask 在调度器启动后调用一次）
+ * @return true = 芯片存在且配置成功
+ * @note  内部先做芯片 ID 探测，再做寄存器配置；失败时保持静默，后续
+ *        negotiationComplete() 会因 fusbPresent()==false 而立即返回 true，
+ *        整个系统退化为"普通 5V 供电"，不影响烙铁基本功能。
+ */
 bool USBPowerDelivery::start() {
   if (fusbPresent() && fusb.fusb_setup()) {
     setupFUSBIRQ();
@@ -43,6 +70,11 @@ bool USBPowerDelivery::start() {
   }
   return false;
 }
+// 以下四个是极薄的转发：把"事件/节拍/状态查询"传给策略引擎。
+// 之所以还要包一层，是为了让上层（POWTask/PIDThread/GUI）不直接依赖 usb-pd 头文件。
+// negotiationInProgress：还在等第一份 Source Capabilities；PID 启动时会短暂等它。
+// negotiationComplete：已收到能力集或超时（超时值来自设置项 PDNegTimeout）。
+
 void    USBPowerDelivery::IRQOccured() { pe.IRQOccured(); }
 bool    USBPowerDelivery::negotiationHasWorked() { return pe.pdHasNegotiated(); }
 uint8_t USBPowerDelivery::getStateNumber() { return pe.currentStateCode(true); }
@@ -76,6 +108,13 @@ bool USBPowerDelivery::fusbPresent() {
   return detectionState == 1;
 }
 
+/**
+ * @brief 探测 VBUS 是否真的带电（部分机型 PD 芯片由 VBUS 供电，拔线后仍可通信）
+ * @return true = VBUS 存在
+ * @note  结果用 static state 永久缓存（1=有，2=无）：VBUS 状态在运行中不会变，
+ *        而 I2C 读一次要几百微秒，没必要反复测。协商未完成前一律返回 true，
+ *        避免把"正在协商"误判成"没插电"。
+ */
 bool USBPowerDelivery::isVBUSConnected() {
 #if NEEDS_VBUS_PROBE == 1
   static uint8_t state = 0;
@@ -101,6 +140,14 @@ uint32_t  lastCapabilities[11];
 uint32_t *USBPowerDelivery::getLastSeenCapabilities() { return lastCapabilities; }
 
 #ifdef POW_EPR
+/**
+ * @brief 整数平方根（逐位逼近，无浮点、无除法）
+ * @param sqrtArg 被开方数
+ * @return floor(sqrt(sqrtArg))
+ * @note  EPR/AVS 档位给的是"最大功率 + 电阻"，需要反解电压：V=sqrt(P*R)。
+ *        在 Cortex-M0/M3 上没有 FPU，浮点 sqrt 会拖入大量库代码，所以手写。
+ *        算法：从 bit15 开始试置位，平方后超了就撤销，16 次迭代得到 16 位结果。
+ */
 static unsigned int sqrtI(unsigned long sqrtArg) {
   unsigned int  answer, x;
   unsigned long temp;
@@ -128,6 +175,22 @@ static unsigned int sqrtI(unsigned long sqrtArg) {
 // parseCapabilitiesArray returns true if a valid capability was found
 // caps is the array of capabilities objects
 // best* are output references
+/**
+ * @brief 从充电器广播的 PDO 列表里挑"最适合当前烙铁"的一档
+ * @param numCaps     PDO 个数
+ * @param bestIndex   输出：选中的 PDO 下标（0xFF 表示没选中）
+ * @param bestVoltage 输出：目标电压（mV）
+ * @param bestCurrent 输出：目标电流（10 mA 单位）
+ * @param bestIsPPS   输出：是否为 PPS 档（可调压）
+ * @param bestIsAVS   输出：是否为 AVS 档（EPR 可调压）
+ * @return true = 找到可用档位
+ * @note  选择策略不是"电压越高越好"，而是"在电流能力足够的前提下取最高电压"：
+ *        烙铁是纯电阻负载，功率 ≈ V²/R，电压越高功率越大；但如果某档的
+ *        最大电流撑不住 V/R，插上去会被拉垮（充电器限流/重启），必须排除。
+ *        判据 min_resistance = V/I <= R_tip 即为此意。
+ *        DEFAULT 模式额外把 R_tip 加 0.5 Ω，用来补偿线缆/PCB 压降，
+ *        让充电器多给一点电流余量（SAFE 模式不加，NO_DYNAMIC 只选固定档）。
+ */
 bool parseCapabilitiesArray(const uint8_t numCaps, uint8_t *bestIndex, uint16_t *bestVoltage, uint16_t *bestCurrent, bool *bestIsPPS, bool *bestIsAVS) {
   // Walk the given capabilities array; and select the best option
   // Given assumption of fixed tip resistance; this can be simplified to highest voltage selection
@@ -154,12 +217,16 @@ bool parseCapabilitiesArray(const uint8_t numCaps, uint8_t *bestIndex, uint16_t 
 
       int voltage_mv             = PD_PDV2MV(PD_PDO_SRC_FIXED_VOLTAGE_GET(lastCapabilities[i])); // voltage in mV units
       int current_a_x100         = PD_PDO_SRC_FIXED_CURRENT_GET(lastCapabilities[i]);            // current in 10mA units
+      // 单位推导：mV / (10 mA) = 0.1 Ω，正好与 tipResistance（0.1 Ω 单位）同量纲，
+      // 所以可以直接比较，不需要再乘除 100。
       int min_resistance_ohmsx10 = voltage_mv / current_a_x100;
       if (voltage_mv > 0) {
         if (voltage_mv <= (USB_PD_VMAX * 1000)) {
           if (voltage_mv <= 20000 || (pd_mode != usbpdMode_t::NO_DYNAMIC)) {
             if (min_resistance_ohmsx10 <= tipResistance) {
               // This is a valid power source we can select as
+              // 只在"更高电压"时替换：同等电压下保留先出现的那档（通常是更低电流），
+              // 避免为了同一电压去要一个更激进的电流档。
               if (voltage_mv > *bestVoltage) {
 
                 // Higher voltage and valid, select this instead
@@ -191,6 +258,9 @@ bool parseCapabilitiesArray(const uint8_t numCaps, uint8_t *bestIndex, uint16_t 
         // Using the current and tip resistance, calculate the ideal max voltage
         // if this is range, then we will work with this voltage
         // if this is not in range; then max_voltage can be safely selected
+        // PPS：电压可调，于是直接解出"刚好用满这档电流"的电压 V=I*R。
+        // 若超过档位上限则夹到上限；再统一夹到 20 V（有些充电器标 21 V 但不稳）
+        // 与机型允许的 USB_PD_VMAX。
         int ideal_voltage_mv = (tipResistance * max_current);
         if (ideal_voltage_mv > max_voltage) {
           ideal_voltage_mv = max_voltage; // constrain to what this PDO offers
@@ -216,6 +286,9 @@ bool parseCapabilitiesArray(const uint8_t numCaps, uint8_t *bestIndex, uint16_t 
         tipResistance        = getTipResistanceX10(); // Dont use fudge factor for EPR
 
         // W = v^2/tip_resistance => Wattage*tip_resistance == Max_voltage^2
+        // AVS：档位给的是功率(W)与电阻(0.1Ω)。W = V²/R → V = sqrt(W*R)。
+        // max_wattage 单位 W，tipResistance 单位 0.1Ω，先 /10 化到 Ω 再开方，
+        // 结果乘 1000 转成 mV。
         auto ideal_max_voltage = sqrtI((max_wattage * tipResistance) / 10) * 1000;
         if (ideal_max_voltage > (USB_PD_VMAX * 1000)) {
           ideal_max_voltage = (USB_PD_VMAX * 1000); // constrain to model max voltage safe to select
@@ -240,6 +313,15 @@ bool parseCapabilitiesArray(const uint8_t numCaps, uint8_t *bestIndex, uint16_t 
   return *bestIndex != 0xFF; // have we selected one
 }
 
+/**
+ * @brief EPR（Extended Power Range，>20 V）能力评估回调
+ * @param capabilities 11 个 PDO（1..7 标准档，8..11 为 EPR 档）
+ * @param request      输出：要发给充电器的 Request 消息
+ * @return 恒为 true（即使没匹配上也回 5 V，保证握手继续）
+ * @note  与普通档最大的区别：Request 有两个数据对象，obj[1] 必须回抄选中的 PDO，
+ *        obj[0] 才是 RDO；并且要置 EPR_CAPABLE 位，否则充电器不会进 EPR 模式。
+ *        协商成功后会更新 powerSupplyWattageLimit，PID 的功率上限立刻跟着变。
+ */
 bool EPREvaluateCapabilityFunc(const epr_pd_msg *capabilities, pd_msg *request) {
 #ifdef POW_EPR
   // Select any EPR slots up to USB_PD_VMAX
@@ -293,6 +375,13 @@ bool EPREvaluateCapabilityFunc(const epr_pd_msg *capabilities, pd_msg *request) 
   return false;
 }
 
+/**
+ * @brief 普通（SPR，<=20 V）能力评估回调：挑档 + 构造 Request
+ * @note  把 Source Capabilities 缓存到 lastCapabilities（GUI 调试页要显示），
+ *        置 haveSeenCapabilityOffer，让 negotiationInProgress() 立刻变 false。
+ *        即使一档都选不上也返回 true 并请求 5 V/100 mA——PD 规范要求 Sink
+ *        必须给出合法 Request，否则充电器会认为对方不支持 PD。
+ */
 bool pdbs_dpm_evaluate_capability(const pd_msg *capabilities, pd_msg *request) {
   memset(lastCapabilities, 0, sizeof(lastCapabilities));
   memcpy(lastCapabilities, capabilities->obj, sizeof(uint32_t) * 7);
@@ -341,6 +430,13 @@ bool pdbs_dpm_evaluate_capability(const pd_msg *capabilities, pd_msg *request) {
   return true;
 }
 
+/**
+ * @brief 往 Sink Capabilities 里追加一条固定电压 PDO
+ * @param voltage_mv 电压（mV）
+ * @param numobj     写入下标
+ * @note  电流按 I=V/R 计算：告诉充电器"这个电压下我需要多少电流"。
+ *        用当前烙铁电阻直接算，等于向充电器声明"我是一根电阻丝"。
+ */
 void add_v_record(pd_msg *cap, uint16_t voltage_mv, int numobj) {
 
   uint16_t current = (voltage_mv) / getTipResistanceX10(); // In centi-amps
@@ -348,6 +444,14 @@ void add_v_record(pd_msg *cap, uint16_t voltage_mv, int numobj) {
   /* Add a PDO for the desired power. */
   cap->obj[numobj] = PD_PDO_TYPE_FIXED | PD_PDO_SNK_FIXED_VOLTAGE_SET(PD_MV2PDV(voltage_mv)) | PD_PDO_SNK_FIXED_CURRENT_SET(current);
 }
+/**
+ * @brief 构造 Sink Capabilities：声明本机想要的电压/电流档位
+ * @param cap   输出消息
+ * @param isPD3 是否 PD3.0（本实现未区分，保留参数）
+ * @note  第一档必须是 5 V（PD 规范强制），随后按 USB_PD_VMAX 依次追加
+ *        9/12/15/20 V。电压必须"从低到高"排列，否则部分充电器会拒绝。
+ *        这些档位只是"我能接受的范围"，真正要哪一档由 evaluate 回调决定。
+ */
 void pdbs_dpm_get_sink_capability(pd_msg *cap, const bool isPD3) {
   /* Keep track of how many PDOs we've added */
   int numobj = 0;
@@ -382,6 +486,8 @@ void pdbs_dpm_get_sink_capability(pd_msg *cap, const bool isPD3) {
 #endif
 
   /* Set the USB communications capable flag. */
+  // 声明支持 USB 通信（本机不做 USB-PD 数据通信，但这个位影响部分充电器的
+  // 供电策略：置位后它们更愿意在 5 V 档给出较大电流）。
   cap->obj[0] |= PD_PDO_SNK_FIXED_USB_COMMS;
 
   /* Set the Sink_Capabilities message header */

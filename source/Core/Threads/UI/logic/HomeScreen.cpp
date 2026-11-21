@@ -2,6 +2,21 @@
 #include "Buttons.hpp"
 #include "OperatingModes.h"
 #include "ui_drawing.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】HomeScreen.cpp —— 待机主界面与入口分发
+ * ----------------------------------------------------------------------------
+ *   drawHomeScreen()    每帧把目标温度强制为 0（确保不加热），读取输入电压与
+ *                       烙铁温度，按 DetailedIDLE 选择详细/简洁布局
+ *   handleHomeButtons() 按键分发：
+ *                         前短按 → Soldering（烙铁头未拔出时）
+ *                         前长按 → SolderingProfile（或 TemperatureAdjust）
+ *                         后短按 → SettingsMenu
+ *                         后长按 → DebugMenuReadout
+ * state1 用作"首次进入忽略按键"的闩锁：从别的模式切回来时，用户可能还按着
+ * 键，先吃掉这一帧的按键，避免误入菜单。
+ * ============================================================================
+ */
 
 bool showExitMenuTransition = false;
 

@@ -8,6 +8,23 @@
 #ifdef I2C_SOFT_BUS_2
 #include "FreeRTOS.h"
 #include <I2CBB2.hpp>
+/*
+ * ============================================================================
+ * 【文件导读】I2CBB2.cpp —— 软件模拟 I2C（第二组总线）
+ * ----------------------------------------------------------------------------
+ * 为什么用软件 I2C：Pinecil 的 OLED/加速度计/PD 芯片分散在不同引脚上，
+ * 硬件 I2C 外设数量不够，且软件实现可在总线卡死时用 GPIO 手动"打拍"解锁。
+ * 主要函数：
+ *   init()/probe()                 引脚与时钟初始化、地址探测
+ *   Mem_Read()/Mem_Write()         带寄存器地址的读写（OLED/传感器主路径）
+ *   Transmit()/Receive()/TransmitReceive()  原始传输
+ *   start()/stop()/send()/read()   位级时序（含 ACK 处理与时钟拉伸等待）
+ *   lock()/unlock()                二值信号量，保证多任务不交叉访问
+ *   wakePart()                     I2C 从机休眠唤醒（9 个时钟脉冲）
+ * 关键约束：所有时序靠 NOP 循环，编译器优化等级变化会影响速率；
+ *           因此工程固定 -O2 并避免在此文件里加耗时逻辑。
+ * ============================================================================
+ */
 SemaphoreHandle_t I2CBB2::I2CSemaphore = NULL;
 StaticSemaphore_t I2CBB2::xSemaphoreBuffer;
 void              I2CBB2::init() {

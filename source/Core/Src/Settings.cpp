@@ -19,6 +19,25 @@
 #include "Translation.h"
 #include "configuration.h"
 #include <string.h> // for memset
+/*
+ * ============================================================================
+ * 【文件导读】Settings.cpp —— 设置持久化与取值范围约束
+ * ----------------------------------------------------------------------------
+ * 主要函数：
+ *   saveSettings()        先与 flash 现有内容 memcmp，不同才写（省擦写寿命）
+ *   loadSettings()        上电读入整块结构，然后 sanitiseSettings()
+ *   sanitiseSettings()    版本号 / 长度 / 每项 min-max 三重校验；越界回默认值
+ *   setSettingValue()     写入前夹到 [min,max]
+ *   nextSettingValue()    按 increment 递增，到顶回绕到 min
+ *   prevSettingValue()    反向递减，到底回绕到 max
+ *   isLastSettingValue()  供菜单做"已到末项"的闪烁提示（温度项按 C/F 换算上限）
+ *   lookupVoltageLevel()  电池串数 → 欠压截止值（x0.1 V）
+ *   lookupHallEffectThreshold() 霍尔档位 0..9 → 阈值，近似指数
+ * 存储布局：systemSettingsType{versionMarker, length, settingsValues[57], padding}
+ *           固定放在 flash 最后一页：SETTINGS_START_PAGE = 0x08000000 + 127 KB。
+ * 数据流：按键 → settingsGUI → setSettingValue → 内存结构 → saveSettings → flash
+ * ============================================================================
+ */
 bool sanitiseSettings();
 
 /*

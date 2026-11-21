@@ -29,6 +29,22 @@
 #include "power.hpp"
 #include "stdlib.h"
 #include "task.h"
+/*
+ * ============================================================================
+ * 【文件导读】MOVThread.cpp —— 加速度计任务（运动/姿态）
+ * ----------------------------------------------------------------------------
+ * 主要函数：
+ *   detectAccelerometerVersion()  按固定顺序探测 5 种加速度计（顺序不可乱：
+ *                                 地址重叠，某些芯片被错误探测后会锁死 I2C）
+ *   readAccelerometer()           多态分发到具体芯片的读轴/读姿态实现
+ *   startMOVTask()                100 ms 周期采样，8 点滑动平均后与当前值比较，
+ *                                 超过阈值就刷新 lastMovementTime（GUI 用它判休眠）
+ * 关键量：threshold = 1500 + 9*200 - Sensitivity*200，即灵敏度 0..9 映射到
+ *         3300..1500 的加速度差阈值；LIS 克隆片另除以 6 补偿灵敏度差异。
+ * 共享：lastMovementTime（GUI 读）、DetectedAccelerometerVersion（启动告警读）、
+ *       OLED::setRotation（自动转屏时直接改显示方向）。
+ * ============================================================================
+ */
 
 #define MOVFilter 8
 uint8_t    accelInit        = 0;

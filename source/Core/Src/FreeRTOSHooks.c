@@ -12,6 +12,18 @@
 
 #include "FreeRTOSHooks.h"
 #include "BSP.h"
+/*
+ * ============================================================================
+ * 【文件导读】FreeRTOSHooks.c —— FreeRTOS 钩子函数
+ * ----------------------------------------------------------------------------
+ *   vApplicationIdleHook()            空闲任务里喂硬件看门狗
+ *   vApplicationGetIdleTaskMemory()   为静态分配的 Idle 任务提供 TCB/栈
+ *   vApplicationStackOverflowHook()   栈溢出时直接 reboot()（无法安全恢复）
+ * 设计要点：看门狗在"空闲任务"里喂，意味着任何任务长期霸占 CPU（不让 Idle
+ * 运行）都会触发复位；这与 PID 任务在 setOutputx10WattsViaFilters 里也喂一次
+ * 形成双保险：控制环活着 或 系统空闲，二者必居其一。
+ * ============================================================================
+ */
 void vApplicationIdleHook(void) { resetWatchdog(); }
 
 /* USER CODE BEGIN GET_IDLE_TASK_MEMORY */

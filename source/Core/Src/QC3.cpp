@@ -16,6 +16,21 @@
 #include "cmsis_os.h"
 #include "configuration.h"
 #include "stdint.h"
+/*
+ * ============================================================================
+ * 【文件导读】QC3.cpp —— Quick Charge 2.0 / 3.0 诱骗
+ * ----------------------------------------------------------------------------
+ * 职责：在 USB 的 D+/D- 上施加特定电压组合，让充电器把 VBUS 升到 9/12/20 V。
+ * 主要函数：
+ *   startQC()        上电握手：D+ ≈0.6 V 保持约 1.25 s，检测 D- 下拉判断
+ *                    充电器是否进入 QC 模式，成功则请求 9 V
+ *   seekQC()         QC3 连续模式下以 0.2 V 步进逼近目标电压（每步 30 ms）
+ *   QC_Seek9V/12V/20V、QC_SeekContMode/Plus/Neg   D+/D- 电平组合原语
+ *   hasQCNegotiated() 供电源管理判断"是否已在用快充"
+ * 硬件依赖：QC_DPlus* / QC_DNeg* 由各 BSP 的 QC_GPIO.cpp 实现（电阻分压网络）。
+ * 状态机：NOT_STARTED → (QC_3 | QC_2 | NO_QC)，QCTries 限制重试次数。
+ * ============================================================================
+ */
 
 enum QCState {
   NOT_STARTED = 0, // Have not checked

@@ -7,6 +7,19 @@
 #include "OLED.hpp"
 #include "Settings.h"
 #include "configuration.h"
+/*
+ * ============================================================================
+ * 【文件导读】ScrollMessage.cpp —— 超长文本的横向滚动
+ * ----------------------------------------------------------------------------
+ * 职责：设置项描述、告警信息往往比 96/128 px 宽，本文件负责"跑马灯"式滚动。
+ * 主要函数：
+ *   str_display_len()  按本工程的自定义编码计算"字符数"（>0xF0 为双字节字符）
+ *   messageWidth()     计算像素宽度；首字节 0x01 表示必须用 12x16 大字
+ *   drawScrollingText() 用"进入时间"算偏移，两端各停留一拍再回卷
+ * 调用者：settingsGUI 的 userConfirmation / SettingsMenu 的帮助文字。
+ * 注意：函数内部会 OLED::clearScreen()，调用前画的内容会被清掉。
+ * ============================================================================
+ */
 
 /**
  * Counts the number of chars in the string excluding the null terminator.

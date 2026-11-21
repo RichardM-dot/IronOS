@@ -4,6 +4,19 @@
 #include "Setup.h"
 #include "Types.h"
 #include <stdint.h>
+/*
+ * ============================================================================
+ * 【文件导读】main.hpp —— 跨任务共享的全局声明
+ * ----------------------------------------------------------------------------
+ * 这里集中声明四个任务入口（startGUITask/startPIDTask/startMOVTask/
+ * startPOWTask）与跨文件变量，避免各 .cpp 互相 extern 造成隐式耦合。
+ *   currentTempTargetDegC  volatile：GUI 写、PID 读（单次 16 位写是原子的）
+ *   pidTaskNotification    ADC ISR → PID 任务的直达通知句柄
+ *   powerSupplyWattageLimit PD 协商得到的瓦数上限（单位 W）
+ *   lastMovementTime       MOV 任务写、GUI 读，休眠判定的核心时间戳
+ * AccelType 枚举同时被启动告警（是否提示"无加速度计"）和 MOV 任务使用。
+ * ============================================================================
+ */
 extern volatile TemperatureType_t currentTempTargetDegC;
 extern bool                       settingsWereReset;
 extern bool                       usb_pd_available;

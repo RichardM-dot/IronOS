@@ -20,6 +20,22 @@
 #include "Settings.h"
 #include "cmsis_os.h"
 #include "power.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】main.cpp —— 启动入口与四个静态任务的定义
+ * ----------------------------------------------------------------------------
+ * 启动链：preRToSInit()（时钟/GPIO/ADC 基础）→ loadSettings()（读 flash 并校验）
+ *        → setTipX10Watts(0)（强制关输出）→ 创建 4 个静态任务 → osKernelStart()。
+ * 任务表（栈数组元素为 uint32_t，字节数 = 元素数 ×4）：
+ *   PIDTask  512 字 = 2 KB  osPriorityRealtime    控温闭环，ADC 中断通知驱动
+ *   POWTask  256 字 = 1 KB  osPriorityAboveNormal USB-PD / QC 协商
+ *   MOVTask  512 字 = 2 KB  osPriorityNormal      加速度计、休眠判定
+ *   GUITask  512 字 = 2 KB  osPriorityBelowNormal OLED 渲染、按键
+ * 本文件只负责"把谁创建出来"，任务主体在 Threads/ 下。
+ * 注意：全部静态分配（configSUPPORT_STATIC_ALLOCATION=1，
+ *       configSUPPORT_DYNAMIC_ALLOCATION=0），堆只有 1 KB 且基本不用。
+ * ============================================================================
+ */
 AccelType DetectedAccelerometerVersion = AccelType::Scanning;
 bool      settingsWereReset            = false;
 // FreeRTOS variables

@@ -2,6 +2,19 @@
 #include "HUB238.hpp"
 #include "OperatingModes.h"
 #include "ui_drawing.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】ShowStartupWarnings.cpp —— 上电告警向导
+ * ----------------------------------------------------------------------------
+ * 按 state1 顺序推进的四道检查，每道都要用户按键确认：
+ *   0 设置被重置（settingsWereReset）→ 提示用户重新配置
+ *   1 器件校验失败（DEVICE_HAS_VALIDATION_SUPPORT）→ 可能非正品
+ *   2 加速度计缺失 → 每次上电最多提示 2 次（计数器存 flash）
+ *   3 PD 芯片缺失（FUSB302/HUB238/FS2711 按机型分支）→ 同样最多 2 次
+ * 走完返回 StartupLogo。计数器的意义：老化的机器每次上电都弹窗会很烦，
+ * 但完全不提示又会让"休眠失灵"难以排查，两次是折中。
+ * ============================================================================
+ */
 OperatingMode showWarnings(const ButtonState buttons, guiContext *cxt) {
   // Display alert if settings were reset
 

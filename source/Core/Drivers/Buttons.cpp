@@ -9,6 +9,20 @@
 #include "settingsGUI.hpp"
 #include "task.h"
 #include <Buttons.hpp>
+/*
+ * ============================================================================
+ * 【文件导读】Buttons.cpp —— 按键消抖与手势识别
+ * ----------------------------------------------------------------------------
+ * 状态机（每个 40 ms 渲染帧调用一次 getButtonState）：
+ *   稳定按下 400 ms（TICKS_100MS*4）→ F_LONG / B_LONG / BOTH_LONG
+ *   按下后释放且未达长按        → F_SHORT / B_SHORT / BOTH
+ * 语义：SHORT 是"按下+释放"的完整脉冲，LONG 是"按住不放"的持续状态；
+ *       长按只会报一次（longPressed 锁存），避免上层重复触发。
+ * 细节：按下时 previousState |= currentState，这样"先松一个再松另一个"仍能
+ *       识别为 BOTH；两键同时按下会屏蔽中途的单键上升沿（防误触）。
+ * 共享：lastButtonTime 供 GUI 休眠判定与帮助文字超时使用。
+ * ============================================================================
+ */
 TickType_t lastButtonTime = 0;
 
 ButtonState getButtonState() {

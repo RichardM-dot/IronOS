@@ -1,5 +1,18 @@
 #include "OperatingModes.h"
 #include "ui_drawing.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】TemperatureAdjust.cpp —— 设定温度调节界面
+ * ----------------------------------------------------------------------------
+ * 进入即把 currentTempTargetDegC 置 0（调温时不加热，防止用户误触烫伤）。
+ * state1 waitForRelease：进入后先等用户松开按键，否则"长按进入"会被当成
+ *        一次连续的加温操作。
+ * state2/state3：自动重复的加速量与时间戳，长按 300 ms 后开始重复，并逐步
+ *        加速到 100 ms 一次（与设置菜单同一套参数 PRESS_ACCEL_*）。
+ * 温度按 TempChangeShortStep / TempChangeLongStep 增减，并按步长对齐取整，
+ * 最后夹在 MIN_TEMP..MAX_TEMP（C/F 各自一套）。3 s 无操作自动保存并退出。
+ * ============================================================================
+ */
 
 OperatingMode gui_solderingTempAdjust(const ButtonState buttonIn, guiContext *cxt) {
 

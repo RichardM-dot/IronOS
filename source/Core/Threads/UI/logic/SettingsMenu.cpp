@@ -1,5 +1,23 @@
 #include "OperatingModes.h"
 #include "ScrollMessage.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】SettingsMenu.cpp —— 二级设置菜单的交互引擎
+ * ----------------------------------------------------------------------------
+ * 菜单模型：rootSettingsMenu（一级：Power/Soldering/PowerSaving/UI/Advanced/
+ *           Language）→ subSettingsMenus[i]（二级：具体设置项）。
+ * 状态全部存在 guiContext.scratch_state 里（模式切换即清零）：
+ *   state1 mainEntry  一级下标
+ *   state2 subEntry   二级下标（0 表示停留在一级）
+ *   state3 autoRepeatAcceleration  长按加速量
+ *   state4 autoRepeatTimer         下次允许重复触发的时刻
+ *   state5 currentMenuLength       当前菜单可见项数（缓存）
+ *   state6 isRenderingHelp         当前是否在显示帮助文字
+ * 主要函数：render_menu / getMenuLength / moveToNextEntry / gui_SettingsMenu。
+ * 交互：3 s 无操作后把"设置名"切换成"滚动帮助文字"；长按自动重复并逐步加速
+ *       （PRESS_ACCEL_STEP 每帧增加，间隔从 300 ms 收敛到 100 ms）。
+ * ============================================================================
+ */
 
 #define HELP_TEXT_TIMEOUT_TICKS (TICKS_SECOND * 3)
 /*

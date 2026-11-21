@@ -13,6 +13,21 @@
 #define CORE_SETTINGS_H_
 #include <stdbool.h>
 #include <stdint.h>
+/*
+ * ============================================================================
+ * 【文件导读】Settings.h —— 全部用户设置的"单一事实来源"
+ * ----------------------------------------------------------------------------
+ * SettingsOptions 枚举的数值就是 settingsValues[] 的下标，也是翻译表
+ * SettingsDescriptions/SettingsShortNames 的下标——三者顺序必须完全一致，
+ * 新增设置项只能追加在 SettingsOptionsLength 之前，不能插队（否则老设备
+ * 升级后所有设置错位）。
+ * SETTINGSVERSION：结构布局版本号，不匹配时整块重置为 0xFF 再填默认值；
+ * Pinecil V2 用 0x55AB（PR #1916 的破坏性变更），其余 0x55AA。
+ * SettingConstants{min,max,increment,defaultValue}：每项的合法范围与步进，
+ * 定义在由 source/Settings/settings.yaml 生成的表里（生成物，勿手改）。
+ * systemSettingsType 必须是 2 字节的整数倍（按 uint16 分块写 flash）。
+ * ============================================================================
+ */
 #ifdef __cplusplus
 #ifdef MODEL_Pinecilv2
 // Required settings reset for PR #1916

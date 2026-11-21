@@ -2,6 +2,20 @@
 #include "OperatingModes.h"
 #include "SolderingCommon.h"
 #include "ui_drawing.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】Soldering.cpp —— 焊接模式（最常用的工作状态）
+ * ----------------------------------------------------------------------------
+ * 主要函数：
+ *   handleSolderingButtons()  按键语义：短按 → 调温；前长按 → Boost；
+ *                             后长按/双键 → 回 Home；双键长按 → 锁定/解锁
+ *   gui_solderingMode()       每帧：按设置写 currentTempTargetDegC → 画温度/功率
+ *                             → 检查欠压/休眠/关机/热失控 → 处理按键
+ * 按键锁用 state1 四态编码（0 未锁+已释放, 1 未锁, 2 已锁, 3 已锁+已释放），
+ * 这样"锁定后必须松开再按"才不会立刻触发解锁。
+ * 退出条件优先级：欠压 > 关机 > 睡眠 > 热失控 > 用户按键。
+ * ============================================================================
+ */
 // State 1 = button locking  (0:unlocked+released, 1:unlocked, 2:locked, 3:locked+released)
 // State 2 = boost mode
 // State 3 = buzzer timer

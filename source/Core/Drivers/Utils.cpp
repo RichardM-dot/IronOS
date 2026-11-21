@@ -9,6 +9,19 @@
 #include "Settings.h"
 #include "configuration.h"
 #include <Utils.hpp>
+/*
+ * ============================================================================
+ * 【文件导读】Utils.cpp —— 查表插值与电学小工具
+ * ----------------------------------------------------------------------------
+ *   InterpolateLookupTable()  在"成对 (x,y)"的查找表里定位区间并线性插值；
+ *                            温度表（uV→C）就用它，表项按 x 升序排列
+ *   LinearInterpolate()       定点插值：先放大 1000 倍再除，避免整数截断
+ *   RequiredCurrentForTipAtVoltage()  V/R 估算某电压下烙铁需要多少电流，
+ *                            供电协商（PPS/AVS 选档）用它判断档位是否够用
+ * 注意：InterpolateLookupTable 的循环从 1 开始、到 noItems-2 结束，
+ *       因此表至少要有 2 项；超出表尾时用最后一段外推。
+ * ============================================================================
+ */
 
 int32_t Utils::InterpolateLookupTable(const int32_t *lookupTable, const int noItems, const int32_t value) {
   for (int i = 1; i < (noItems - 1); i++) {

@@ -1,5 +1,17 @@
 #include "OperatingModes.h"
 #include "ui_drawing.hpp"
+/*
+ * ============================================================================
+ * 【文件导读】Sleep.cpp —— 睡眠 / 休眠模式
+ * ----------------------------------------------------------------------------
+ * 两种状态共用本函数，用 cxt->scratch_state.state4 区分：
+ *   Sleeping     目标温度 = min(SleepTemp, SolderingTemp)，仍保持低温待命
+ *   Hibernating  目标温度 = 0，完全断电，只能靠按键/运动唤醒
+ * 每帧检查 shouldBeSleeping()（运动+霍尔超时）与 shouldShutdown()（关机超时），
+ * 任一满足就切回 HomeScreen（关机）或回到 previousMode（被唤醒）。
+ * 注意：NO_SLEEP_MODE 机型直接返回 Soldering，本文件其余代码不参与编译。
+ * ============================================================================
+ */
 OperatingMode gui_SolderingSleepingMode(const ButtonState buttons, guiContext *cxt) {
 #ifdef NO_SLEEP_MODE
   return OperatingMode::Soldering;
